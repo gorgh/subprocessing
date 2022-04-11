@@ -1,0 +1,118 @@
+stages:
+  - test
+  - package
+  - deploy
+
+variables:
+  VERSION_REGEX: /^(?:v?(?:([0-9]+)!)?([0-9]+(?:\.[0-9]+)*)([-_\.]?((a|b|c|rc|alpha|beta|pre|preview))[-_\.]?([0-9]+)?)?((?:-([0-9]+))|(?:[-_\.]?(post|rev|r)[-_\.]?([0-9]+)?))?([-_\.]?(dev)[-_\.]?([0-9]+)?)?(?:\+([a-z0-9]+(?:[-_\.][a-z0-9]+)*))?)$/
+
+workflow:
+  # The pipeline is created when:
+  # - The default branch of the project is updated
+  # - A merge request is created or updated
+  # - A scheduled pipeline is started
+  # - A version tag is pushed
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == 'schedule'
+    - if: $CI_COMMIT_TAG =~ $VERSION_REGEX
+
+# Default parameters for all the jobs
+.default-python:
+  image: python:latest
+
+  # Cache pip's cache
+  variables:
+    PIP_CACHE_DIR: "${CI_PROJECT_DIR}/.cache/pip"
+  cache:
+    paths:
+      - .cache/pip
+
+  before_script:
+    # Update pip and wheel to be sure that it will use cache
+    - python -m pip install --upgrade
+      pip
+      wheel
+
+    # Use the Package Repository of the GitLab project
+    - python -m pip config --global set global.extra-index-url
+      ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
+
+# Execute the tests
+test:
+  stage: test
+  extends: .default-python
+  parallel:
+    matrix:
+      - PY_VERSION:
+        - "3.7"
+        - "3.8"
+        - "3.9"
+        - "3.10"
+        - "3.11"
+  image: python:${PY_VERSION}-slim
+
+  script:
+    - python -m pip install --upgrade
+      tox
+    - python -m tox -e py
+
+  coverage: '/^TOTAL\s+\d+\s+\d+\s+(\d+\%)$/'
+
+  artifacts:
+    name: ${CI_JOB_NAME}-${CI_JOB_STAGE}-${CI_COMMIT_REF_SLUG}
+    expose_as: Profiling cProfile reports
+    paths:
+      - prof/
+    expire_in: 1 day
+
+    name: ${CI_JOB_NAME}-${CI_JOB_STAGE}-${CI_COMMIT_REF_SLUG}
+    expose_as: Coverage HTML report
+    paths:
+      - htmlcov/
+    expire_in: 1 day
+
+# Build the package
+package:
+  stage: package
+  extends: .default-python
+  needs:
+    - *default-python-needs
+    - job: test
+
+  script:
+    - python -m pip install --upgrade
+      setuptools
+      wheel
+      build
+    - python -m build .
+
+  artifacts:
+    name: ${CI_JOB_NAME}-${CI_JOB_STAGE}-${CI_COMMIT_REF_SLUG}
+    expose_as: Python wheel package
+    paths:
+      - dist/
+    expire_in: 1 day
+
+# Release the package on the internal PyPI repository
+deploy:
+  stage: deploy
+  extends: .default-python
+  rules:
+    # If you tag a new version of the package
+    - if: $CI_COMMIT_TAG =~ $VERSION_REGEX
+  needs:
+    - *default-python-needs
+    - job: package
+      artifacts: true
+
+  script:
+    - python -m pip install --upgrade
+      twine
+    - python -m twine upload
+      --verbose
+      --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
+      --username gitlab-ci-token
+      --password ${CI_JOB_TOKEN}
+      dist/*

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Test
+.venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+.tox/
+prof/
+
+# pyenv
+.python-version
+
+# IDE
+.vscode/
